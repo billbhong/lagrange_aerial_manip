@@ -1,0 +1,34 @@
+function [u_de] = flatness_controller(X, flat_des, aerial_robot)
+    % This is flat_des
+    % flat_des.p       = interp1(traj_data.t, traj_data.p', t)'; 
+    % flat_des.p_dot   = interp1(traj_data.t, traj_data.p_dot', t)';
+    % flat_des.p_ddot  = interp1(traj_data.t, traj_data.p_ddot', t)';
+    % flat_des.psi     = interp1(traj_data.t, traj_data.psi', t)';
+    % flat_des.psi_dot = interp1(traj_data.t, traj_data.psi_dot', t)';
+    % flat_des.eta     = interp1(traj_data.t, traj_data.eta', t)';
+    % flat_des.eta_dot = interp1(traj_data.t, traj_data.eta_dot', t)';
+    
+    % This is X
+    % q = X(1:8); % [x, y, z, roll, pitch, yaw, eta1, eta2]
+    % q_dot = X(9:16);
+    % T = X(17);
+    % T_dot = X(18);
+
+    % 1. Map current state X to current flat outputs
+    flat_curr.p       = X(1:3); 
+    flat_curr.p_dot   = X(9:11);
+    % flat_curr.p_ddot  = ;
+    flat_curr.psi     = X(6);
+    flat_curr.psi_dot = X(14);
+    flat_curr.eta     = X(7);
+    flat_curr.eta_dot = ;
+
+    % 2. CLF-QP calculates the commanded highest-order derivatives (virtual control 'v')
+    v_cmd = solve_clf_qp(flat_curr, flat_des); 
+    
+    % 3. USE YOUR FLATNESS INVERSE MAPPING HERE!
+    % Instead of plugging in the purely "desired" trajectory, you plug in the 
+    % current flat states + the CLF-QP's commanded highest derivatives 
+    % to figure out what torques the motors need to apply right now.
+    u_de = computeInputsFromFlatOutputs(flat_curr.p, flat_curr.p_dot, ..., v_cmd);
+end

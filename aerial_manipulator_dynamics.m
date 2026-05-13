@@ -1,0 +1,60 @@
+function dX = aerial_manipulator_dynamics(t, X, aerial_robot, traj_data)
+    % NOT USED CURRENTLY
+    % 1. UNPACK CURRENT STATE
+    q = X(1:8); % [x, y, z, roll, pitch, yaw, eta1, eta2]
+    q_dot = X(9:16);
+    T = X(17); % thrust
+    T_dot = X(18);
+    
+    % 2. GET DESIRED FLAT OUTPUTS AT t (via interpolation)
+    flat_des.p       = interp1(traj_data.t, traj_data.p', t)'; 
+    flat_des.p_dot   = interp1(traj_data.t, traj_data.p_dot', t)';
+    flat_des.p_ddot  = interp1(traj_data.t, traj_data.p_ddot', t)';
+    flat_des.p_dddot = interp1(traj_data.t, traj_data.p_dddot', t)';
+    flat_des.p_ddddot= interp1(traj_data.t, traj_data.p_ddddot', t)';
+    flat_des.psi     = interp1(traj_data.t, traj_data.psi', t)';
+    flat_des.psi_dot = interp1(traj_data.t, traj_data.psi_dot', t)';
+    flat_des.eta     = interp1(traj_data.t, traj_data.eta', t)';
+    flat_des.eta_dot = interp1(traj_data.t, traj_data.eta_dot', t)';
+                                                      
+    % 3. CONTROLLER
+    % The controller takes the CURRENT state X, and the DESIRED flat trajectory.
+    % Inside this function, it will map X to the current flat outputs, compare 
+    % against flat_des, solve the CLF-QP, and return the extended inputs.
+    u_de = flatness_controller(X, flat_des, aerial_robot);
+    
+    % Right above eq 26
+    T_ddot  = u_de(1);
+    tau_uav = u_de(2:4);
+    tau_arm = u_de(5:6);
+    
+    % 4. SYSTEM DYNAMICS (EQ 26)
+    phi   = q(4); % Roll
+    theta = q(5); % Pitch
+    psi   = q(6); % Yaw
+    
+    % Map Thrust to Global X, Y, Z forces
+    R_eb = eul2rotm([psi, theta, phi], 'ZYX'); 
+    F_global = R_eb * [0; 0; T]; 
+    
+    tau_gen = zeros(8, 1);
+    tau_gen(1:3) = F_global; % Translational forces
+    tau_gen(4:6) = tau_uav;  % UAV rotational torques
+    tau_gen(7:8) = tau_arm;  % Manipulator joint torques
+    
+    % Get M and cg from rigid body tree
+    config = convert_to_tree_config(q);
+    config_dot = convert_to_tree_vel(q, q_dot);
+    
+    M = massMatrix(aerial_robot, config);
+    cg = velocityProduct(aerial_robot, config, config_dot) + gravityTorque(aerial_robot, config);
+    
+    q_ddot = M \ (tau_gen - cg);
+    
+    % 5. PACK DERIVATIVES (dX)
+    dX = zeros(18, 1);
+    dX(1:8)   = q_dot;      % derivative of position is velocity
+    dX(9:16)  = q_ddot;     % derivative of velocity is acceleration
+    dX(17)    = T_dot;      % derivative of Thrust
+    dX(18)    = T_ddot;     % derivative of Thrust_dot (from controller)
+end

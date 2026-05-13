@@ -1,5 +1,7 @@
 clear; clc;
 
+addpath('robot_state');
+
 k = 2; % Number of manipulator links
 link_length = 0.2; % 20cm links
 m_t = 0; % weight in kg (added together later)
@@ -57,7 +59,13 @@ for i = 1:k
     link.Joint = joint;
     link.Mass = 0.2;
     m_t = m_t + link.Mass;
-    link.Inertia = [0.001 0.001 0.001 0 0 0];
+
+    % move center of mass to center
+    link.CenterOfMass = [link_length/2, 0, 0]; 
+    
+    % Physically accurate cylinder inertia [Ixx, Iyy, Izz, Iyz, Ixz, Ixy]
+    % Using roughly Ixx = 0.00006, Iyy = 0.0007, Izz = 0.0007
+    link.Inertia = [0.00006 0.0007 0.0007 0 0 0];
     
     % -- Add Visuals to the Arm Link --
     % MATLAB cylinders are centered at the origin and point along the Z-axis by default.
@@ -73,13 +81,13 @@ end
 %% --- 3. TRAJECTORY GENERATION ---
 % Define your time vector (e.g., a 5-second flight at 100Hz)
 fs = 60; % Sample rate
-t = 0:(1/fs):5; 
+t = 0:(1/fs):10; 
 
 
 % Must match waypoints column size
-time_points = [0, 2, 4.0];
+time_points = [0, 1.5, 3, 5.0, 7, 9, 10];
 
-use_waypoints = true;
+use_waypoints = false;
 
 if use_waypoints
     % 1. Define start and end poses
@@ -88,9 +96,9 @@ if use_waypoints
                     0, 1.0,  2.0]; % Z-axis: Climbs to 1m, then up to 2m 
 else
     % --- PARAMETRIC HELIX TRAJECTORY ---
-    radius = 1.5;            % 1.5 meter radius turn
-    omega  = (2*pi) / 5;     % Completes one full circle in 5 seconds
-    climb_rate = 0.4;        % Climbs 0.4 meters per second
+    radius = 2.0;            % radius in meters of circle
+    omega  = (2*pi) / 3;     % Completes one full circle in /x seconds
+    climb_rate = 0.4;        % Climbing velocity
     
     % Position (X, Y, Z)
     p_traj = [radius * sin(omega * t); 
@@ -109,11 +117,11 @@ else
 end
 
 % 2. Define Waypoints for Yaw (psi)
-psi_waypoints = [0, pi/2, pi/4];
+psi_waypoints = [0, -pi, pi/2, -3*pi/4, 0, -pi/2, pi/3];
 
 % 3. Define Waypoints for Joint Angles (eta)
-eta_waypoints = [0, pi/2, pi % first joint
-                 0, pi/3, -pi]; % 2nd joint
+eta_waypoints = [pi/2, 0,  pi,  pi/4, 2*pi/3,       0, pi/2; % first joint
+                 0, pi/2, -pi, -pi/2,      0, -2*pi/3,    0]; % 2nd joint
 
 % Generate smooth trajectories (outputs are [values, velocities, accelerations])
 if use_waypoints
@@ -129,6 +137,50 @@ p_dddot_traj(1,:) = gradient(p_ddot_traj(1,:), dt); % X-axis jerk
 p_dddot_traj(2,:) = gradient(p_ddot_traj(2,:), dt); % Y-axis jerk
 p_dddot_traj(3,:) = gradient(p_ddot_traj(3,:), dt); % Z-axis jerk
 
+% Calculate Snap
+p_ddddot_traj = zeros(size(p_dddot_traj));
+p_ddddot_traj(1,:) = gradient(p_dddot_traj(1,:), dt); 
+p_ddddot_traj(2,:) = gradient(p_dddot_traj(2,:), dt); 
+p_ddddot_traj(3,:) = gradient(p_dddot_traj(3,:), dt); 
+
+% Package trajectory into a struct so the ODE can access it at any time 't'
+traj_data.t = t;
+% position
+traj_data.p = p_traj;
+traj_data.p_dot = p_dot_traj;
+traj_data.p_ddot = p_ddot_traj;
+traj_data.p_dddot = p_dddot_traj;
+traj_data.p_ddddot = p_ddddot_traj;
+% yaw
+traj_data.psi = psi_traj;
+traj_data.psi_dot = psi_dot_traj;
+% joint angles
+traj_data.eta = eta_traj;
+traj_data.eta_dot = eta_dot_traj;
+
+%% --- (Disabled) Full closed-loop dynamics with controller ---
+% Re-enable once flatness_controller / computeInputsFromFlatOutputs are complete.
+%
+% q0 = [p_traj(:,1); 0; 0; psi_traj(1); eta_traj(:,1)];
+% q_dot0 = zeros(8,1);
+% T0 = m_t * 9.81; T_dot0 = 0;
+% X0 = [q0; q_dot0; T0; T_dot0];
+% options = odeset('RelTol', 1e-3, 'AbsTol', 1e-4);
+% [t_out, X_out] = ode45(@(t, X) aerial_manipulator_dynamics(t, X, aerial_robot, traj_data), ...
+%                        [t(1), t(end)], X0, options);
+
+%% --- Flatness inversion: integrate base velocity to recover base position ---
+% Initial base position: choose s_b(0) so that CoM at t=0 equals p_traj(:,1).
+[~, phi0, theta0] = computeThrustAndAttitude(m_t * p_ddot_traj(:,1), psi_traj(1), m_t, 9.81);
+R0 = eul2rotm([psi_traj(1), theta0, phi0], 'ZYX');
+com_body_0 = centerOfMass(aerial_robot, [0;0;0; 1;0;0;0; eta_traj(:,1)]);
+s_b0 = p_traj(:,1) - R0 * com_body_0;
+
+options = odeset('RelTol', 1e-6, 'AbsTol', 1e-8);
+disp('Integrating base velocity via ode45 ...');
+[t_out, S_out] = ode45(@(t, s_b) base_velocity_dynamics(t, s_b, traj_data, aerial_robot, m_t), ...
+                       [t(1), t(end)], s_b0, options);
+%%
 
 % Create a figure window for the animation
 figure('Name', 'Aerial Manipulator Simulation', 'Color', 'white', 'Position', [100 100 800 600]);
@@ -142,14 +194,19 @@ view(3); grid on; hold on;
 % lighting gouraud;      % Turns on smooth 3D shading
 xlabel('X (m)'); ylabel('Y (m)'); zlabel('Z (m)');
 
-% Plot the reference trajectory line
-% plot3(p_traj(1,:), p_traj(2,:), p_traj(3,:), 'k--', 'LineWidth', 1.5);
+% Plot the reference CoM trajectory (blue) and the integrated base trajectory (red)
 traj_line = plot3(p_traj(1,:), p_traj(2,:), p_traj(3,:), ...
                   'Color', [0 0.447 0.741], ... % MATLAB standard blue
                   'LineWidth', 2.5);
-
-% Apply transparency (Alpha) to the line so it blends into the background
 traj_line.Color(4) = 0.3; % 30% opacity
+
+base_line = plot3(S_out(:,1), S_out(:,2), S_out(:,3), ...
+                  'Color', [0.85 0.10 0.10], ... % red
+                  'LineWidth', 2.5);
+base_line.Color(4) = 0.5; % 50% opacity
+
+legend([traj_line, base_line], {'CoM trajectory (target)', 'Base position (integrated)'}, ...
+       'Location', 'northeast', 'AutoUpdate', 'off');
 
 time_hud = annotation('textbox', [0.05, 0.85, 0.2, 0.1], ...
                       'String', 'Time: 0.00 s', ...
@@ -181,51 +238,22 @@ for idx = 1:size(t, 2)
     % Grab current values
     current_time_step = t(:, idx);
 
-    current_pos     = p_traj(:, idx);       % Position (X, Y, Z)
-    current_vel     = p_dot_traj(:, idx);   % Velocity
-    current_accel   = p_ddot_traj(:, idx);  % Acceleration
-    current_jerk    = p_dddot_traj(:, idx); % Jerk
+    % Integrated base position from ode45 (NOT the CoM trajectory directly)
+    current_base_pos = interp1(t_out, S_out, current_time_step)';
 
-    % yaw
     current_psi = psi_traj(:, idx);
-    current_psi_dot = psi_dot_traj(:, idx);
-
-    % joint angles
     current_eta = eta_traj(:, idx);
-    current_eta_dot = eta_dot_traj(:, idx);
 
-    % Convert vel to to momemtum
-    current_p_e      = m_t * current_vel;    
-    current_p_dot_e  = m_t * current_accel;  
-    current_p_ddot_e = m_t * current_jerk;
-    
-    % Get the mass matrix from robot and the joint angle positions
-    M_blocks = computeMassMatrixBlocks(aerial_robot, current_eta);
+    % Recover roll and pitch for animation (eqs. 21-23)
+    p_dot_e = m_t * p_ddot_traj(:, idx);
+    [~, phi, theta] = computeThrustAndAttitude(p_dot_e, current_psi, m_t, 9.81);
 
-    q = computeStateFromFlatOutputs(current_p_e, ...
-                                    current_p_dot_e, ...
-                                    current_p_ddot_e, ...
-                                    current_psi, ...
-                                    current_psi_dot, ...
-                                    current_eta, ...
-                                    current_eta_dot, ...
-                                    m_t, ...
-                                    M_blocks);
+    % ZYX (Yaw, Pitch, Roll) -> quaternion [Qw, Qx, Qy, Qz]
+    quat = eul2quat([current_psi, theta, phi], 'ZYX');
 
-    % get calculated Roll and Pitch from the state vector 'q'
-    % note yaw (psi) is part of the planner
-    phi   = q(7);
-    theta = q(8);
-    psi = current_psi;
-    
-    % Get Configuration Vector for Animation
-    % Convert Euler angles to Quaternion [Qw, Qx, Qy, Qz]
-    % Note: eul2quat expects ZYX order (Yaw, Pitch, Roll)
-    quat = eul2quat([psi, theta, phi], 'ZYX'); 
-    
     % Order for a 'floating' joint in column format is: [Qw; Qx; Qy; Qz; X; Y; Z]
-    base_config = [quat'; current_pos]; 
-    
+    base_config = [quat'; current_base_pos];
+
     % Combine base configuration with joint angles
     config = [base_config; current_eta];
     
@@ -236,16 +264,16 @@ for idx = 1:size(t, 2)
 
       
     % camera look at drone
-    camtarget(ax, current_pos'); 
-    
+    camtarget(ax, current_base_pos');
+
     % for dynamic turning
-    % cam_x = current_pos(1) - follow_dist * cos(current_psi);
-    % cam_y = current_pos(2) - follow_dist * sin(current_psi);
-    % cam_z = current_pos(3) + cam_height;
-    % 
+    % cam_x = current_base_pos(1) - follow_dist * cos(current_psi);
+    % cam_y = current_base_pos(2) - follow_dist * sin(current_psi);
+    % cam_z = current_base_pos(3) + cam_height;
+    %
     % campos(ax, [cam_x, cam_y, cam_z]);
 
-    campos(ax, [current_pos(1) + offset_x, current_pos(2) + offset_y, current_pos(3) + cam_height]);
+    campos(ax, [current_base_pos(1) + offset_x, current_base_pos(2) + offset_y, current_base_pos(3) + cam_height]);
 
     camva(ax, 45);
     

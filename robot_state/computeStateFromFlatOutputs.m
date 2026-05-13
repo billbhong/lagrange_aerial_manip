@@ -1,4 +1,4 @@
-function q = computeStateFromFlatOutputs(p_e, p_dot_e, p_ddot_e, psi, psi_dot, eta, eta_dot, m_t, M_blocks)
+function [q, T_full] = computeStateFromFlatOutputs(p_e, p_dot_e, p_ddot_e, psi, psi_dot, eta, eta_dot, m_t, M_blocks)
     % Computes the full state vector q from the flat outputs.
     %
     % Inputs:
@@ -12,10 +12,18 @@ function q = computeStateFromFlatOutputs(p_e, p_dot_e, p_ddot_e, psi, psi_dot, e
     % Output:
     %   q                      : The full state vector 
     
-    g = 9.81; % Define gravity (ensure sign matches your plant's convention)
+    g = 9.81; % Define gravity
 
     %% 1. Get Thrust and Attitude
     [T, phi, theta] = computeThrustAndAttitude(p_dot_e, psi, m_t, g);
+
+    gravity_comp = [0; 0; m_t * g]; 
+    
+    % The net force vector (F)
+    F = p_dot_e + gravity_comp;
+    
+    % Analytical derivative of Thrust
+    T_dot = (F' * p_ddot_e) / T;
     
     %% 2. Get Body Rates
     omega_b = computeBodyRates(p_dot_e, p_ddot_e, psi, psi_dot, m_t, g);
@@ -44,5 +52,7 @@ function q = computeStateFromFlatOutputs(p_e, p_dot_e, p_ddot_e, psi, psi_dot, e
     %% 7. Assemble the Full State Vector (q)
     % q = [p; l; phi; theta; psi; eta; eta_dot]
     q = [p; l; phi; theta; psi; eta; eta_dot];
+
+    T_full = [T; T_dot];
     
 end

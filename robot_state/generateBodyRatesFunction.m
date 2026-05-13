@@ -5,7 +5,7 @@ clear; clc;
 
 %% 1. Define Symbolic Variables
 syms p_dot_e1 p_dot_e2 p_dot_e3 real
-syms p_ddot_e1 p_ddot_e2 p_ddot_e3 real % 2nd derivative of linear momentum
+syms p_ddot_e1 p_ddot_e2 p_ddot_e3 real % 2nd derivative of linear CoM
 syms psi psi_dot m_t g real
 
 p_dot_e = [p_dot_e1; p_dot_e2; p_dot_e3];

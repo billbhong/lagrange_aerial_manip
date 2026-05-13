@@ -57,7 +57,13 @@ for i = 1:k
     link.Joint = joint;
     link.Mass = 0.2;
     m_t = m_t + link.Mass;
-    link.Inertia = [0.001 0.001 0.001 0 0 0];
+
+    % move center of mass to center
+    link.CenterOfMass = [link_length/2, 0, 0]; 
+    
+    % Physically accurate cylinder inertia [Ixx, Iyy, Izz, Iyz, Ixz, Ixy]
+    % Using roughly Ixx = 0.00006, Iyy = 0.0007, Izz = 0.0007
+    link.Inertia = [0.00006 0.0007 0.0007 0 0 0];
     
     % -- Add Visuals to the Arm Link --
     % MATLAB cylinders are centered at the origin and point along the Z-axis by default.
@@ -70,16 +76,16 @@ for i = 1:k
     parent_body = link_name;
 end
 
-%% --- 3. TRAJECTORY GENERATION and simulation ---
+%% --- 3. TRAJECTORY GENERATION ---
 % Define your time vector (e.g., a 5-second flight at 100Hz)
-fs = 100; % Sample rate
-t = 0:(1/fs):5; 
+fs = 60; % Sample rate
+t = 0:(1/fs):10; 
 
 
 % Must match waypoints column size
-time_points = [0, 2.5, 5.0];
+time_points = [0, 1.5, 3, 5.0, 7, 9, 10];
 
-use_waypoints = true;
+use_waypoints = false;
 
 if use_waypoints
     % 1. Define start and end poses
@@ -88,9 +94,9 @@ if use_waypoints
                     0, 1.0,  2.0]; % Z-axis: Climbs to 1m, then up to 2m 
 else
     % --- PARAMETRIC HELIX TRAJECTORY ---
-    radius = 1.5;            % 1.5 meter radius turn
-    omega  = (2*pi) / 5;     % Completes one full circle in 5 seconds
-    climb_rate = 0.4;        % Climbs 0.4 meters per second
+    radius = 2.0;            % radius in meters of circle
+    omega  = (2*pi) / 3;     % Completes one full circle in /x seconds
+    climb_rate = 0.4;        % Climbing velocity
     
     % Position (X, Y, Z)
     p_traj = [radius * sin(omega * t); 
@@ -109,11 +115,11 @@ else
 end
 
 % 2. Define Waypoints for Yaw (psi)
-psi_waypoints = [0, pi/2, pi/4];
+psi_waypoints = [0, -pi, pi/2, -3*pi/4, 0, -pi/2, pi/3];
 
 % 3. Define Waypoints for Joint Angles (eta)
-eta_waypoints = [0, pi/2, pi % first joint
-                 0, -pi/3, -pi]; % 2nd joint
+eta_waypoints = [pi/2, 0,  pi,  pi/4, 2*pi/3,       0, pi/2; % first joint
+                 0, pi/2, -pi, -pi/2,      0, -2*pi/3,    0]; % 2nd joint
 
 % Generate smooth trajectories (outputs are [values, velocities, accelerations])
 if use_waypoints
@@ -129,6 +135,38 @@ p_dddot_traj(1,:) = gradient(p_ddot_traj(1,:), dt); % X-axis jerk
 p_dddot_traj(2,:) = gradient(p_ddot_traj(2,:), dt); % Y-axis jerk
 p_dddot_traj(3,:) = gradient(p_ddot_traj(3,:), dt); % Z-axis jerk
 
+% Package trajectory into a struct so the ODE can access it at any time 't'
+traj_data.t = t;
+% position
+traj_data.p = p_traj;
+traj_data.p_dot = p_dot_traj;
+traj_data.p_ddot = p_ddot_traj;
+traj_data.p_dddot = p_dddot_traj;
+% yaw
+traj_data.psi = psi_traj;
+traj_data.psi_dot = psi_dot_traj;
+% joint angles
+traj_data.eta = eta_traj;
+traj_data.eta_dot = eta_dot_traj;
+
+%% RUN ODE45 FORWARD SIMULATION 
+% Define Initial Conditions (X0)
+% Start at rest at the first trajectory waypoint
+q0 = [p_traj(:,1); 0; 0; psi_traj(1); eta_traj(:,1)]; % [pos; r; p; y; eta]
+q_dot0 = zeros(8,1); % At rest
+T0 = m_t * 9.81;     % Initial thrust equals hover weight
+T_dot0 = 0;          
+
+X0 = [q0; q_dot0; T0; T_dot0];
+
+% Set ODE Options (Tolerances are important for rigid body dynamics)
+options = odeset('RelTol', 1e-3, 'AbsTol', 1e-4);
+
+% Run ode45
+disp('Running forward dynamics simulation (ODE45)...');
+[t_out, X_out] = ode45(@(t, X) aerial_manipulator_dynamics(t, X, aerial_robot, traj_data), ...
+                       [t(1), t(end)], X0, options);
+%%
 
 % Create a figure window for the animation
 figure('Name', 'Aerial Manipulator Simulation', 'Color', 'white', 'Position', [100 100 800 600]);
@@ -142,7 +180,7 @@ view(3); grid on; hold on;
 % lighting gouraud;      % Turns on smooth 3D shading
 xlabel('X (m)'); ylabel('Y (m)'); zlabel('Z (m)');
 
-% Plot the reference trajectory line
+% Plot the reference trajectory line (ideal)
 % plot3(p_traj(1,:), p_traj(2,:), p_traj(3,:), 'k--', 'LineWidth', 1.5);
 traj_line = plot3(p_traj(1,:), p_traj(2,:), p_traj(3,:), ...
                   'Color', [0 0.447 0.741], ... % MATLAB standard blue
@@ -162,48 +200,61 @@ time_hud = annotation('textbox', [0.05, 0.85, 0.2, 0.1], ...
 
     offset_x   = -2.5; % 3 meters behind along the X-axis
     offset_y   = 0; % no offset horizontally
-    cam_height = 0.7; % above droen
+    cam_height = 0.7; % above drone
+
+% --- VIDEO RECORDING SETUP ---
+    video_filename = 'Aerial_Manipulator_Flight.mp4';
+    vid = VideoWriter(video_filename, 'MPEG-4');
+    
+    % Set playback framerate. If your simulation runs at fs=100, a 100fps video 
+    % might be too large or not supported by some players. 30 or 60 is standard.
+    vid.FrameRate = 60; 
+    vid.Quality = 100; % Max quality
+    
+    open(vid); % "Turn on" the camera
+
+%% 5. Simulation
 
 for idx = 1:size(t, 2)
     % Grab current values
     current_time_step = t(:, idx);
 
-    current_pos     = p_traj(:, idx);       % Position (X, Y, Z)
-    current_vel     = p_dot_traj(:, idx);   % Velocity
-    current_accel   = p_ddot_traj(:, idx);  % Acceleration
-    current_jerk    = p_dddot_traj(:, idx); % Jerk
-
-    % yaw
-    current_psi = psi_traj(:, idx);
-    current_psi_dot = psi_dot_traj(:, idx);
-
-    % joint angles
-    current_eta = eta_traj(:, idx);
-    current_eta_dot = eta_dot_traj(:, idx);
-
-    % Convert vel to to momemtum
-    current_p_e      = m_t * current_vel;    
-    current_p_dot_e  = m_t * current_accel;  
-    current_p_ddot_e = m_t * current_jerk;
-    
-    % Get the mass matrix from robot and the joint angle positions
-    M_blocks = computeMassMatrixBlocks(aerial_robot, current_eta);
-
-    q = computeStateFromFlatOutputs(current_p_e, ...
-                                    current_p_dot_e, ...
-                                    current_p_ddot_e, ...
-                                    current_psi, ...
-                                    current_psi_dot, ...
-                                    current_eta, ...
-                                    current_eta_dot, ...
-                                    m_t, ...
-                                    M_blocks);
-
-    % get calculated Roll and Pitch from the state vector 'q'
-    % note yaw (psi) is part of the planner
-    phi   = q(7);
-    theta = q(8);
-    psi = current_psi;
+    % current_pos     = p_traj(:, idx);       % Position (X, Y, Z)
+    % current_vel     = p_dot_traj(:, idx);   % Velocity
+    % current_accel   = p_ddot_traj(:, idx);  % Acceleration
+    % current_jerk    = p_dddot_traj(:, idx); % Jerk
+    % 
+    % % yaw
+    % current_psi = psi_traj(:, idx);
+    % current_psi_dot = psi_dot_traj(:, idx);
+    % 
+    % % joint angles
+    % current_eta = eta_traj(:, idx);
+    % current_eta_dot = eta_dot_traj(:, idx);
+    % 
+    % % Convert vel to to momemtum
+    % current_p_e      = m_t * current_vel;    
+    % current_p_dot_e  = m_t * current_accel;  
+    % current_p_ddot_e = m_t * current_jerk;
+    % 
+    % % Get the mass matrix from robot and the joint angle positions
+    % M_blocks = computeMassMatrixBlocks(aerial_robot, current_eta);
+    % 
+    % [q, T_full] = computeStateFromFlatOutputs(current_p_e, ...
+    %                                 current_p_dot_e, ...
+    %                                 current_p_ddot_e, ...
+    %                                 current_psi, ...
+    %                                 current_psi_dot, ...
+    %                                 current_eta, ...
+    %                                 current_eta_dot, ...
+    %                                 m_t, ...
+    %                                 M_blocks);
+    % 
+    % % get calculated Roll and Pitch from the state vector 'q'
+    % % note yaw (psi) is part of the planner
+    % phi   = q(7);
+    % theta = q(8);
+    % psi = current_psi;
     
     % Get Configuration Vector for Animation
     % Convert Euler angles to Quaternion [Qw, Qx, Qy, Qz]
@@ -240,7 +291,14 @@ for idx = 1:size(t, 2)
     camup(ax, [0 0 1]);
     
     drawnow limitrate;
+    % --- CAPTURE FRAME FOR VIDEO ---
+    % getframe(gcf) captures the entire figure window (including titles/HUD)
+    frame = getframe(gcf); 
+    writeVideo(vid, frame);
     
     % Optional: Uncomment below to make it run closer to real-time 
     % pause(1/fs); 
 end
+
+close(vid); % "Turn off" the camera and finalize the file
+fprintf('Video successfully saved to: %s\n', video_filename);
