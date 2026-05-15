@@ -26,15 +26,44 @@ addVisual(uav_base, 'Box', [0.15, 0.15, 0.08], trvec2tform([0, 0, 0]));
 addVisual(uav_base, 'Box', [0.5, 0.02, 0.02], trvec2tform([0, 0, 0]) * eul2tform([pi/4, 0, 0]));
 addVisual(uav_base, 'Box', [0.5, 0.02, 0.02], trvec2tform([0, 0, 0]) * eul2tform([-pi/4, 0, 0]));
 
-% 3. Rotors (Four thin cylinders at the ends of the arms)
-rotor_dist = 0.175; % Distance from center to rotors
+% Rotor mounting positions (visuals + mass are added below as separate bodies)
+rotor_dist   = 0.175; % Distance from center to rotors
 rotor_height = 0.02;
-addVisual(uav_base, 'Cylinder', [0.1, 0.01], trvec2tform([rotor_dist, rotor_dist, rotor_height]));
-addVisual(uav_base, 'Cylinder', [0.1, 0.01], trvec2tform([-rotor_dist, rotor_dist, rotor_height]));
-addVisual(uav_base, 'Cylinder', [0.1, 0.01], trvec2tform([rotor_dist, -rotor_dist, rotor_height]));
-addVisual(uav_base, 'Cylinder', [0.1, 0.01], trvec2tform([-rotor_dist, -rotor_dist, rotor_height]));
 
 addBody(aerial_robot, uav_base, 'base');
+
+% --- Propellers as separate fixed-joint rigid bodies ---
+% Modeled so their mass and inertia contribute to the system mass matrix.
+prop_mass   = 0.025;  % 25 g per propeller (typical small quad)
+prop_radius = 0.1;
+prop_height = 0.01;
+
+% Thin-disk inertia about the propeller's own center:
+%   Ixx = Iyy = m*r^2 / 4 (about diameter)
+%   Izz = m*r^2 / 2       (about spin axis)
+prop_Ixx = prop_mass * prop_radius^2 / 4;
+prop_Izz = prop_mass * prop_radius^2 / 2;
+prop_inertia = [prop_Ixx, prop_Ixx, prop_Izz, 0, 0, 0];
+
+rotor_positions = [ rotor_dist,  rotor_dist, rotor_height;
+                   -rotor_dist,  rotor_dist, rotor_height;
+                    rotor_dist, -rotor_dist, rotor_height;
+                   -rotor_dist, -rotor_dist, rotor_height];
+
+for prop_idx = 1:size(rotor_positions, 1)
+    prop_body  = rigidBody(sprintf('prop_%d', prop_idx));
+    prop_joint = rigidBodyJoint(sprintf('prop_joint_%d', prop_idx), 'fixed');
+    setFixedTransform(prop_joint, trvec2tform(rotor_positions(prop_idx, :)));
+    prop_body.Joint   = prop_joint;
+    prop_body.Mass    = prop_mass;
+    prop_body.Inertia = prop_inertia;
+
+    % Propeller visual (cylinder centered on the prop body's origin)
+    addVisual(prop_body, 'Cylinder', [prop_radius, prop_height], trvec2tform([0, 0, 0]));
+
+    addBody(aerial_robot, prop_body, 'uav_base');
+    m_t = m_t + prop_mass;
+end
 
 %% --- 2. INITIALIZE k-LINKED MANIPULATOR WITH VISUALS ---
 parent_body = 'uav_base';
@@ -171,9 +200,12 @@ traj_data.eta_dot = eta_dot_traj;
 
 %% --- Flatness inversion: integrate base velocity to recover base position ---
 % Initial base position: choose s_b(0) so that CoM at t=0 equals p_traj(:,1).
+% MATLAB's floating-joint config order is [quat; pos; eta]. Evaluating at
+% identity base pose makes centerOfMass return the body-frame CoM offset
+% (Delta / m_t) since the world frame coincides with the body frame there.
 [~, phi0, theta0] = computeThrustAndAttitude(m_t * p_ddot_traj(:,1), psi_traj(1), m_t, 9.81);
 R0 = eul2rotm([psi_traj(1), theta0, phi0], 'ZYX');
-com_body_0 = centerOfMass(aerial_robot, [0;0;0; 1;0;0;0; eta_traj(:,1)]);
+com_body_0 = centerOfMass(aerial_robot, [1;0;0;0; 0;0;0; eta_traj(:,1)]);
 s_b0 = p_traj(:,1) - R0 * com_body_0;
 
 options = odeset('RelTol', 1e-6, 'AbsTol', 1e-8);
